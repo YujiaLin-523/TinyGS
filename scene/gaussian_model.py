@@ -647,7 +647,8 @@ class GaussianModel:
                 os.path.join(path, f"grid_{normalized_key}.npz"),
                 data=param_quant.astype(np.uint8),
                 scale=param_scale,
-                min=param_min
+                min=param_min,
+                orig_key=np.array(key)
             )
 
         # G-PCC encoding
@@ -723,27 +724,18 @@ class GaussianModel:
         self._features_dc = torch.from_numpy(np.asarray(f_dc)).cuda()
         self._scaling_base = torch.from_numpy(np.asarray(scaling_base)).cuda()
         
-        # Load HierarchicalDualBranchEncoder state_dict with underscore format
         grid_state_dict = {}
         for filename in os.listdir(path):
             if filename.startswith("grid_") and filename.endswith(".npz"):
-                key = filename[5:-4]  # "grid_hash_encoder_params.npz" -> "hash_encoder_params"
                 grid_dict = np.load(os.path.join(path, filename))
                 grid_params = dequantize(grid_dict['data'], grid_dict['scale'], grid_dict['min'], log=True)
-                grid_state_dict[key] = torch.from_numpy(np.asarray(grid_params)).half().cuda()
-        
-        # Convert underscore format back to dot format for model loading
+
+                orig_key = grid_dict['orig_key'].item() if grid_dict['orig_key'].shape == () else str(grid_dict['orig_key'])
+                grid_state_dict[orig_key] = torch.from_numpy(np.asarray(grid_params)).half().cuda()
+
         if grid_state_dict:
-            converted_dict = {}
-            for k, v in grid_state_dict.items():
-                # Replace first underscore with dot (hash_encoder_params -> hash_encoder.params)
-                parts = k.split("_", 1)
-                new_k = parts[0] + "." + parts[1] if len(parts) == 2 else k
-                # Further convert plane/projection underscores to dots
-                new_k = new_k.replace("plane_", "plane.").replace("projection_", "projection.")
-                converted_dict[new_k] = v
-            self._grid.load_state_dict(converted_dict, strict=False)
-        
+            self._grid.load_state_dict(grid_state_dict, strict=True)
+
         # sh_mask
         sh_mask = np.load(os.path.join(path, 'sh_mask.npz'))['data'].astype(np.float32)
         self._sh_mask = torch.from_numpy(np.asarray(sh_mask)).cuda()

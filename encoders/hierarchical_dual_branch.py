@@ -87,7 +87,7 @@ class HierarchicalDualBranchEncoder(nn.Module):
         glf_channels: int = 8,
         glf_resolution: int = 64,
         glf_rank: int = 8,
-        beta: float = 0.1
+        beta: float = 0.05
     ):
         super().__init__()
         
@@ -164,7 +164,8 @@ class HierarchicalDualBranchEncoder(nn.Module):
         output = self.fusion_layer(combined_features)  # [N, out_dim]
         
         # Numerical stability: clamp output to reasonable range
-        # This prevents extreme values from propagating through the network
-        output = torch.clamp(output, -10.0, 10.0)
-        
+        # This prevents extreme values from propagating through the network 
+        output = torch.nan_to_num(output, nan=0.0, posinf=1e6, neginf=-1e6)
+        output = torch.clamp(output, min=-1e6, max=1e6)
+
         return output

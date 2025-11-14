@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# LocoGS One-Click Environment Setup Script
+# GlowGS Environment Setup Script
 # For CUDA 11.7 and RTX A6000
 
 set -e  # Exit immediately if a command exits with a non-zero status
@@ -25,7 +25,7 @@ echo_error() {
 
 # Check if in conda environment
 if [ -z "$CONDA_DEFAULT_ENV" ]; then
-    echo_error "Please activate conda environment first: conda activate locogs"
+    echo_error "Please activate conda environment first: conda activate glowgs"
     exit 1
 fi
 
