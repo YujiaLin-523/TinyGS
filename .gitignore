@@ -54,9 +54,6 @@ logs/
 # -------------------- Cache directories --------------------
 .cache/
 assets/cache/
-utils/__pycache__/
-gaussian_renderer/__pycache__/
-arguments/__pycache__/
 
 # -------------------- Model weights / checkpoints --------------------
 checkpoints/
