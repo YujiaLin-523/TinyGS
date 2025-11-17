@@ -29,6 +29,11 @@ if [ -z "$CONDA_DEFAULT_ENV" ]; then
     exit 1
 fi
 
+conda create -n glowgs python=3.10
+conda activate glowgs
+
+export LD_LIBRARY_PATH="$CONDA_PREFIX/lib:$LD_LIBRARY_PATH"
+
 echo_info "Current conda environment: $CONDA_DEFAULT_ENV"
 
 # Set CUDA environment variables
@@ -102,8 +107,8 @@ if [ $? -ne 0 ]; then
 fi
 
 # Step 2: Install basic Python dependencies
-echo_info "Step 2/7: Installing basic Python dependencies..."
-pip install numpy plyfile==0.8.1 tqdm imageio opencv-python imageio-ffmpeg scipy dearpygui lpips
+echo_info "Step 2/7: Installing basic Python dependencies (numpy<2, plyfile, tqdm, imageio, opencv, scipy, dearpygui, lpips)..."
+pip install "numpy<2" plyfile==0.8.1 tqdm imageio opencv-python imageio-ffmpeg scipy dearpygui lpips
 
 # Step 3: Install diff-gaussian-rasterization
 echo_info "Step 3/7: Installing diff-gaussian-rasterization..."
@@ -142,7 +147,6 @@ echo_info "Verifying tiny-cuda-nn installation..."
 python -c "
 import tinycudann as tcnn
 print(f'tiny-cuda-nn installed successfully!')
-print(f'tcnn version: {tcnn.__version__}')
 "
 
 if [ $? -ne 0 ]; then
@@ -151,19 +155,24 @@ if [ $? -ne 0 ]; then
 fi
 
 # Step 7: Install pymeshlab (for nerfstudio point cloud export)
-echo_info "Step 7/7: Installing pymeshlab (via conda-forge)..."
-conda install -c conda-forge pymeshlab -y
+echo_info "Step 7/7: Installing pymeshlab via conda-forge to resolve Qt/C++ ABI..."
+pip uninstall -y pymeshlab pyqt5 PyQt5-Qt5 PyQt5-sip 2>/dev/null || true
+conda install -y -c conda-forge pymeshlab pyqt libstdcxx-ng qt-main
 
-# Verify pymeshlab installation
-echo_info "Verifying pymeshlab installation..."
-python -c "
-import pymeshlab
-print('pymeshlab installed successfully!')
-"
+echo_info "Verifying pymeshlab import..."
+python - <<'PY'
+import pymeshlab, sys
+print("pymeshlab version:", pymeshlab.__version__)
+ms = pymeshlab.MeshSet()
+print("MeshSet created OK")
+PY
 
 if [ $? -ne 0 ]; then
-    echo_warn "pymeshlab verification failed, trying pip installation..."
-    pip install pymeshlab
+    echo_error "pymeshlab installation verification failed."
+    echo_error "This is often due to a C++/Qt dependency mismatch when using pip."
+    echo_error "If this persists, the most reliable solution is to use conda:"
+    echo_error "conda install -c conda-forge pymeshlab pyqt -y"
+    exit 1
 fi
 
 # Final verification
@@ -177,15 +186,6 @@ import torch
 import numpy
 import cv2
 import tinycudann as tcnn
-import pymeshlab
-
-print('✓ Python version:', sys.version)
-print('✓ PyTorch version:', torch.__version__)
-print('✓ CUDA available:', torch.cuda.is_available())
-print('✓ NumPy version:', numpy.__version__)
-print('✓ OpenCV version:', cv2.__version__)
-print('✓ tiny-cuda-nn version:', tcnn.__version__)
-print('✓ pymeshlab imported successfully')
 
 # Check all required packages
 required_packages = [
@@ -200,23 +200,7 @@ for pkg in required_packages:
         print(f'✗ {pkg} import failed: {e}')
         sys.exit(1)
 
-print('\\n' + '='*50)
-print('🎉 All dependencies installed successfully! Environment setup complete!')
-print('='*50)
+print('\\n' + '='*70)
+print('All dependencies installed successfully! Environment setup complete!')
+print('='*70)
 "
-
-if [ $? -eq 0 ]; then
-    echo_info ""
-    echo_info "========================================="
-    echo_info "🎉 Environment setup completed successfully!"
-    echo_info "========================================="
-    echo_info ""
-    echo_info "Next steps:"
-    echo_info "  1. Run training script: ./train_360_v2.sh"
-    echo_info "  2. Run preprocessing script: ./preprocessing_360_v2.sh"
-    echo_info "  3. Run evaluation script: ./evaluate_360_v2.sh"
-    echo_info ""
-else
-    echo_error "Environment setup failed, please check the error messages above"
-    exit 1
-fi

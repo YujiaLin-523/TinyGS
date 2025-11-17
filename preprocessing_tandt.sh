@@ -15,6 +15,9 @@ ns-train nerfacto --data data/tandt/train \
                   --vis tensorboard \
                   --machine.seed 0  \
                   --pipeline.model.camera-optimizer.mode off \
+                  --steps-per-eval-batch 1000000 \
+                  --steps-per-eval-image 1000000 \
+                  --steps-per-eval-all-images 1000000
 
 # export pointcloud
 ns-export pointcloud --load-config output/train/nerfacto/run/config.yml \
@@ -37,6 +40,9 @@ ns-train nerfacto --data data/tandt/truck \
                   --vis tensorboard \
                   --machine.seed 0  \
                   --pipeline.model.camera-optimizer.mode off \
+                  --steps-per-eval-batch 1000000 \
+                  --steps-per-eval-image 1000000 \
+                  --steps-per-eval-all-images 1000000
 
 # export pointcloud
 ns-export pointcloud --load-config output/truck/nerfacto/run/config.yml \
