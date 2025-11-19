@@ -29,6 +29,33 @@ try:
 except ImportError:
     TENSORBOARD_FOUND = False
 
+try:
+    from pytorch_wavelets import DWTForward
+    WAVELETS_AVAILABLE = True
+except ImportError:
+    WAVELETS_AVAILABLE = False
+
+def compute_wavelet_loss(rgb_pred, rgb_gt, dwt):
+    """
+    Compute high-frequency wavelet-domain L1 loss between prediction and ground truth.
+    
+    Inspired by wavelet-based image restoration (Korkmaz et al., CVPR 2024).
+    Preserves fine details by penalizing differences in high-frequency wavelet subbands.
+    
+    Args:
+        rgb_pred: [B, 3, H, W] predicted RGB image
+        rgb_gt:   [B, 3, H, W] ground-truth RGB image
+        dwt:      DWTForward module for wavelet decomposition
+    Returns:
+        Scalar wavelet-domain L1 loss
+    """
+    Yl_pred, Yh_pred = dwt(rgb_pred)
+    Yl_gt, Yh_gt = dwt(rgb_gt)
+    
+    # Yh[0] contains high-frequency subbands [B, C, 3, H', W'] (LH, HL, HH)
+    wavelet_diff = Yh_pred[0] - Yh_gt[0]
+    return wavelet_diff.abs().mean()
+
 def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, debug_from):
     first_iter = 0
     tb_writer = prepare_output_and_logger(dataset)
@@ -41,6 +68,17 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
     bg_color = [1, 1, 1] if dataset.white_background else [0, 0, 0]
     background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
+    
+    # Initialize wavelet transform for wavelet loss if enabled
+    dwt = None
+    if opt.use_wavelet_loss:
+        if WAVELETS_AVAILABLE:
+            dwt = DWTForward(J=1, wave='haar', mode='zero').cuda()
+            print(f"[Wavelet Loss] Enabled with weight={opt.lambda_wavelet}")
+        else:
+            print("[Warning] use_wavelet_loss=True but pytorch_wavelets not installed. Disabling wavelet loss.")
+            print("[Info] Install with: pip install pytorch_wavelets")
+            opt.use_wavelet_loss = False
 
     iter_start = torch.cuda.Event(enable_timing = True)
     iter_end = torch.cuda.Event(enable_timing = True)
@@ -100,6 +138,14 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 sh_mask_loss += lambda_degree * torch.mean(gaussians.get_sh_mask[..., degree - 1])
 
         loss = pixel_loss + opt.lambda_mask * mask_loss + opt.lambda_sh_mask * sh_mask_loss
+        
+        # Add wavelet loss if enabled
+        if opt.use_wavelet_loss and dwt is not None:
+            rgb_pred = image.unsqueeze(0)  # [3, H, W] -> [1, 3, H, W]
+            rgb_gt = gt_image.unsqueeze(0)
+            wavelet_loss = compute_wavelet_loss(rgb_pred, rgb_gt, dwt)
+            loss = loss + opt.lambda_wavelet * wavelet_loss
+        
         loss.backward()
 
         iter_end.record()
@@ -135,6 +181,13 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 print(f"    Pixel (RGB) : {loss_pixel_val:.6f} (L1={Ll1.item():.6f})")
                 print(f"    Mask        : {loss_mask_val:.6f} (weight={opt.lambda_mask:.4f})")
                 print(f"    SH Mask     : {loss_sh_mask_val:.6f} (weight={opt.lambda_sh_mask:.4f})")
+                if opt.use_wavelet_loss and dwt is not None:
+                    # Recompute wavelet loss for logging (no gradient needed)
+                    with torch.no_grad():
+                        rgb_pred = image.unsqueeze(0)
+                        rgb_gt = gt_image.unsqueeze(0)
+                        loss_wavelet_val = compute_wavelet_loss(rgb_pred, rgb_gt, dwt).item()
+                    print(f"    Wavelet     : {loss_wavelet_val:.6f} (weight={opt.lambda_wavelet:.4f})")
                 print(f"  Gaussians:")
                 print(f"    Count       : {n_gaussians:,} ({n_gaussians//1000}k points)")
                 print(f"    SH Degree   : {gaussians.active_sh_degree}/{gaussians.max_sh_degree}")

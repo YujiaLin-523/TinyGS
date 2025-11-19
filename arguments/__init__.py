@@ -129,6 +129,8 @@ class OptimizationParams(ParamGroup):
         self.densify_grad_threshold = 0.0002
         self.prune_interval = 1000
         self.random_background = False
+        self.use_wavelet_loss = False  # Enable wavelet-domain loss for high-frequency detail preservation
+        self.lambda_wavelet = 0.05  # Weight for wavelet loss (used when use_wavelet_loss=True)
         super().__init__(parser, "Optimization Parameters")
 
 def get_combined_args(parser : ArgumentParser):
