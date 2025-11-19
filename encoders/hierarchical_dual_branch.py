@@ -13,25 +13,6 @@ Key Design Principles:
 - GLF branch acts as a gentle global bias for smoothness
 - No complex gating or scheduling mechanisms for training stability
 - Fixed beta ensures predictable behavior across training
-
-Architecture:
-    Input: 3D coordinates
-    ↓
-    ┌─────────────────┬─────────────────┐
-    │   Hash Branch   │   GLF Branch    │
-    │  (High-freq)    │  (Low-freq)     │
-    └────────┬────────┴────────┬────────┘
-             │                 │ (*beta)
-             └────────┬────────┘
-                      ↓
-                Concatenate
-                      ↓
-               Linear Fusion
-                      ↓
-                  Output
-
-Author: TinyGS Project
-License: See LICENSE.md
 """
 
 import torch
