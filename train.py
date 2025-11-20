@@ -12,6 +12,7 @@
 import os
 import torch
 import torchvision
+import torch.nn.functional as F
 from random import randint
 from utils.loss_utils import l1_loss, ssim
 from gaussian_renderer import render, network_gui
@@ -35,26 +36,70 @@ try:
 except ImportError:
     WAVELETS_AVAILABLE = False
 
-def compute_wavelet_loss(rgb_pred, rgb_gt, dwt):
-    """
-    Compute high-frequency wavelet-domain L1 loss between prediction and ground truth.
-    
-    Inspired by wavelet-based image restoration (Korkmaz et al., CVPR 2024).
-    Preserves fine details by penalizing differences in high-frequency wavelet subbands.
-    
-    Args:
-        rgb_pred: [B, 3, H, W] predicted RGB image
-        rgb_gt:   [B, 3, H, W] ground-truth RGB image
-        dwt:      DWTForward module for wavelet decomposition
-    Returns:
-        Scalar wavelet-domain L1 loss
-    """
+def compute_wavelet_loss_curriculum(
+    rgb_pred,
+    rgb_gt,
+    dwt,
+    iteration,
+    max_iterations,
+    ll_weight,
+    hf_weight,
+    transition_ratio,
+):
+    """Compute curriculum wavelet loss with separate low/high bands."""
+
     Yl_pred, Yh_pred = dwt(rgb_pred)
     Yl_gt, Yh_gt = dwt(rgb_gt)
-    
-    # Yh[0] contains high-frequency subbands [B, C, 3, H', W'] (LH, HL, HH)
-    wavelet_diff = Yh_pred[0] - Yh_gt[0]
-    return wavelet_diff.abs().mean()
+
+    low_freq_loss = torch.abs(Yl_pred - Yl_gt).mean()
+
+    high_freq_diff = Yh_pred[0] - Yh_gt[0]
+    high_freq_abs = torch.abs(high_freq_diff)
+    high_freq_loss = high_freq_abs.mean(dim=(0, 1, 3, 4)).sum()
+
+    max_iterations = max(1, int(max_iterations))
+    transition_ratio = float(max(1e-6, min(1.0, transition_ratio)))
+    transition_steps = max(1, int(max_iterations * transition_ratio))
+    iter_index = max(0, iteration - 1)
+    progress = min(iter_index / transition_steps, 1.0)
+
+    lambda_ll = float(ll_weight) * max(0.0, 1.0 - progress)
+    lambda_hf = float(hf_weight) * progress
+
+    total_loss = lambda_ll * low_freq_loss + lambda_hf * high_freq_loss
+
+    stats = {
+        "low_freq_loss": low_freq_loss.detach(),
+        "high_freq_loss": high_freq_loss.detach(),
+        "lambda_ll": lambda_ll,
+        "lambda_hf": lambda_hf,
+    }
+    return total_loss, stats
+
+
+def wavelet_loss(rgb_pred, rgb_gt, dwt, weight_min, weight_max, eps=1e-6):
+    """Compute HF-weighted RGB L1 using GT wavelet energy as weights."""
+
+    with torch.no_grad():
+        _, Yh_gt = dwt(rgb_gt)
+        hf_coeffs = Yh_gt[0]
+        hf_energy = torch.sum(hf_coeffs ** 2, dim=(1, 2))
+        hf_energy = torch.sqrt(hf_energy + eps).unsqueeze(1)
+        weight_map = F.interpolate(
+            hf_energy,
+            size=rgb_gt.shape[-2:],
+            mode="bilinear",
+            align_corners=False,
+        )
+        weight_map_mean = weight_map.mean(dim=(2, 3), keepdim=True)
+        weight_map = weight_map / (weight_map_mean + eps)
+        weight_map = torch.clamp(weight_map, min=weight_min, max=weight_max)
+        weight_map = weight_map.detach()
+
+    per_pixel = torch.abs(rgb_pred - rgb_gt).mean(dim=1, keepdim=True)
+    weighted_sum = (weight_map * per_pixel).sum()
+    normalization = weight_map.sum().clamp_min(1e-6)
+    return weighted_sum / normalization
 
 def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, debug_from):
     first_iter = 0
@@ -129,7 +174,24 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         # Loss
         gt_image = viewpoint_cam.original_image.cuda()
         Ll1 = l1_loss(image, gt_image)
-        pixel_loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim(image, gt_image))
+
+        hf_rgb_loss_value = None
+        rgb_pred_batch = None
+        rgb_gt_batch = None
+        if opt.use_wavelet_loss and dwt is not None:
+            rgb_pred_batch = image.unsqueeze(0)
+            rgb_gt_batch = gt_image.unsqueeze(0)
+            pixel_loss = wavelet_loss(
+                rgb_pred_batch,
+                rgb_gt_batch,
+                dwt,
+                weight_min=opt.hf_weight_min,
+                weight_max=opt.hf_weight_max,
+                eps=opt.hf_weight_epsilon,
+            )
+            hf_rgb_loss_value = pixel_loss.detach()
+        else:
+            pixel_loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim(image, gt_image))
         mask_loss = torch.mean(gaussians.get_mask)
         sh_mask_loss = 0.0
         if iteration > opt.densify_until_iter:
@@ -139,12 +201,25 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
         loss = pixel_loss + opt.lambda_mask * mask_loss + opt.lambda_sh_mask * sh_mask_loss
         
+        wavelet_stats = None
+        wavelet_loss_value = None
         # Add wavelet loss if enabled
         if opt.use_wavelet_loss and dwt is not None:
-            rgb_pred = image.unsqueeze(0)  # [3, H, W] -> [1, 3, H, W]
-            rgb_gt = gt_image.unsqueeze(0)
-            wavelet_loss = compute_wavelet_loss(rgb_pred, rgb_gt, dwt)
-            loss = loss + opt.lambda_wavelet * wavelet_loss
+            if rgb_pred_batch is None or rgb_gt_batch is None:
+                rgb_pred_batch = image.unsqueeze(0)
+                rgb_gt_batch = gt_image.unsqueeze(0)
+            wavelet_loss_raw, wavelet_stats = compute_wavelet_loss_curriculum(
+                rgb_pred_batch,
+                rgb_gt_batch,
+                dwt,
+                iteration=iteration,
+                max_iterations=opt.iterations,
+                ll_weight=opt.wavelet_ll_weight,
+                hf_weight=opt.wavelet_hf_weight,
+                transition_ratio=opt.wavelet_transition_ratio,
+            )
+            loss = loss + opt.lambda_wavelet * wavelet_loss_raw
+            wavelet_loss_value = wavelet_loss_raw.detach()
         
         loss.backward()
 
@@ -178,16 +253,17 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 print(f"{'-'*80}")
                 print(f"  Loss Breakdown:")
                 print(f"    Total       : {loss_total_val:.6f}")
-                print(f"    Pixel (RGB) : {loss_pixel_val:.6f} (L1={Ll1.item():.6f})")
+                pixel_label = "Pixel (RGB)"
+                if opt.use_wavelet_loss and hf_rgb_loss_value is not None:
+                    pixel_label = "Pixel (HF RGB)"
+                print(f"    {pixel_label:<13}: {loss_pixel_val:.6f} (L1={Ll1.item():.6f})")
                 print(f"    Mask        : {loss_mask_val:.6f} (weight={opt.lambda_mask:.4f})")
                 print(f"    SH Mask     : {loss_sh_mask_val:.6f} (weight={opt.lambda_sh_mask:.4f})")
-                if opt.use_wavelet_loss and dwt is not None:
-                    # Recompute wavelet loss for logging (no gradient needed)
-                    with torch.no_grad():
-                        rgb_pred = image.unsqueeze(0)
-                        rgb_gt = gt_image.unsqueeze(0)
-                        loss_wavelet_val = compute_wavelet_loss(rgb_pred, rgb_gt, dwt).item()
-                    print(f"    Wavelet     : {loss_wavelet_val:.6f} (weight={opt.lambda_wavelet:.4f})")
+                if opt.use_wavelet_loss and wavelet_loss_value is not None and wavelet_stats is not None:
+                    print(
+                        f"    Wavelet     : {wavelet_loss_value.item():.6f} "
+                        f"(lambda_LL={wavelet_stats['lambda_ll']:.3f}, lambda_HF={wavelet_stats['lambda_hf']:.3f}, weight={opt.lambda_wavelet:.4f})"
+                    )
                 print(f"  Gaussians:")
                 print(f"    Count       : {n_gaussians:,} ({n_gaussians//1000}k points)")
                 print(f"    SH Degree   : {gaussians.active_sh_degree}/{gaussians.max_sh_degree}")
